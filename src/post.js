@@ -43,9 +43,29 @@ Module['pipeline'] = async (weightsPath, options = {}) => {
       throw new Error("Node.js environment is not available");
 #endif
     } else {
-      const response = await fetch(weightsPath);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch weights: ${response.status}`);
+      const useCache = options.cacheWeights !== false;
+      const cacheName = 'gemma-weights-cache';
+      let response;
+      let cache;
+      let isCached = false;
+
+      if (useCache && typeof caches !== 'undefined') {
+        try {
+          cache = await caches.open(cacheName);
+          response = await cache.match(weightsPath);
+          if (response) {
+            isCached = true;
+          }
+        } catch (e) {
+          console.warn('Failed to access Cache Storage:', e);
+        }
+      }
+
+      if (!response) {
+        response = await fetch(weightsPath);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch weights: ${response.status}`);
+        }
       }
 
       const contentEncoding = response.headers.get('content-encoding');
@@ -80,6 +100,19 @@ Module['pipeline'] = async (weightsPath, options = {}) => {
       } else {
         const buffer = await response.arrayBuffer();
         data = new Uint8Array(buffer);
+      }
+
+      if (useCache && cache && !isCached) {
+        try {
+          await cache.put(weightsPath, new Response(data, {
+            headers: {
+              'content-type': response.headers.get('content-type') || 'application/octet-stream',
+              'content-length': data.length.toString()
+            }
+          }));
+        } catch (e) {
+          console.warn('Failed to save weights to Cache Storage:', e);
+        }
       }
     }
 
