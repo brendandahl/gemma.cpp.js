@@ -5,6 +5,9 @@ include(FetchContent)
 
 project(gemma_cpp_js)
 
+# --- Define the Environment String Option ---
+set(ENVIRONMENT "" CACHE STRING "Emscripten environment to build for (e.g., web, node, worker)")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -30,6 +33,12 @@ target_link_options(gemma_cpp_js PRIVATE
   -sSTACK_SIZE=2MB
   -sPTHREAD_POOL_SIZE_STRICT=0
 )
+
+# --- Apply the linker flag if the string is not empty ---
+if(ENVIRONMENT)
+  target_link_options(gemma_cpp_js PRIVATE "-sENVIRONMENT=${ENVIRONMENT}")
+endif()
+
 set_target_properties(gemma_cpp_js PROPERTIES SUFFIX ".mjs")
 
 target_link_libraries(gemma_cpp_js libgemma)

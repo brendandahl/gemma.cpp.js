@@ -1,4 +1,4 @@
-
+#preprocess
 // The keep-alive hacks are needed to keep node.js from exiting while the
 // threads are running, but main thread is idle.
 // TODO: Remove these hacks when Emscripten provides a way to keep the main thread alive.
@@ -29,6 +29,7 @@ Module['pipeline'] = async (weightsPath, options = {}) => {
 
   if (!existsInMemfs) {
     if (isNode) {
+#if ENVIRONMENT_MAY_BE_NODE
       const fs = await import('fs');
       const readFileSync = fs.readFileSync || (fs.default && fs.default.readFileSync);
       if (!readFileSync) {
@@ -38,6 +39,9 @@ Module['pipeline'] = async (weightsPath, options = {}) => {
       if (options.progress) {
         options.progress({ loaded: data.length, total: data.length, chunkLength: data.length });
       }
+#else
+      throw new Error("Node.js environment is not available");
+#endif
     } else {
       const response = await fetch(weightsPath);
       if (!response.ok) {
