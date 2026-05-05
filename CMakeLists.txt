@@ -35,5 +35,4 @@ set_target_properties(gemma_cpp_js PROPERTIES SUFFIX ".mjs")
 target_link_libraries(gemma_cpp_js libgemma)
 
 FetchContent_GetProperties(gemma)
-# target_include_directories(jsgemma PRIVATE ${gemma_SOURCE_DIR})
 target_include_directories(gemma_cpp_js PRIVATE ${gemma_SOURCE_DIR})

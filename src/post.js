@@ -44,31 +44,39 @@ Module['pipeline'] = async (weightsPath, options = {}) => {
         throw new Error(`Failed to fetch weights: ${response.status}`);
       }
 
+      const contentEncoding = response.headers.get('content-encoding');
+      const hasCompression = contentEncoding && contentEncoding !== 'identity';
       const contentLength = response.headers.get('content-length');
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-      const reader = response.body.getReader();
+      const total = hasCompression ? null : (contentLength ? parseInt(contentLength, 10) : 0);
+      if (options.progress) {
+        const reader = response.body.getReader();
+        let loaded = 0;
+        const chunks = [];
 
-      let loaded = 0;
-      const chunks = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        chunks.push(value);
-        loaded += value.length;
-        if (options.progress) {
-          options.progress({ loaded, total, chunkLength: value.length });
+          chunks.push(value);
+          loaded += value.length;
+          options.progress({
+            loaded,
+            total,
+            chunkLength: value.length
+          });
         }
-      }
 
-      const buffer = new Uint8Array(loaded);
-      let offset = 0;
-      for (const chunk of chunks) {
-        buffer.set(chunk, offset);
-        offset += chunk.length;
+        const buffer = new Uint8Array(loaded);
+        let offset = 0;
+        for (const chunk of chunks) {
+          buffer.set(chunk, offset);
+          offset += chunk.length;
+        }
+        data = buffer;
+      } else {
+        const buffer = await response.arrayBuffer();
+        data = new Uint8Array(buffer);
       }
-      data = buffer;
     }
 
     if (typeof FS !== 'undefined') {
