@@ -18,7 +18,7 @@ add_link_options(-sMEMORY64=1)
 add_compile_options(-pthread)
 add_link_options(-pthread)
 
-FetchContent_Declare(gemma GIT_REPOSITORY https://github.com/brendandahl/gemma.cpp.git GIT_TAG 94648da6f24d7615f7aa078d1b29288a7beb26eb)
+FetchContent_Declare(gemma GIT_REPOSITORY https://github.com/google/gemma.cpp.git GIT_TAG 98ef1e6fbf104901bfc77dec062e3b17a8151ba1)
 FetchContent_MakeAvailable(gemma)
 
 add_executable(gemma_cpp_js src/bindings.cpp)
