@@ -35,8 +35,9 @@ try {
   model = await gemma.pipeline(weightsPath, { progress: logDownloadProgress });
   const sentence = 'Max 100 word response. Why is the sky blue?';
   console.log('Generating...');
-  const result = await model(sentence);
-  console.log(result);
+  const { text, metrics } = await model(sentence);
+  console.log(text);
+  console.log('Metrics:', metrics);
 } finally {
   console.log('Cleaning up...');
   if (model) model.delete();

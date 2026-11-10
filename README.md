@@ -60,8 +60,14 @@ const model = await gemma.pipeline(weightsPath, {
   progress: (progress) => console.log(`Downloading: ${Math.floor(progress.loaded / progress.total * 100)}%`)
 });
 
-const response = await model("Why is the sky blue?");
-console.log(response);
+const { text, metrics } = await model("Why is the sky blue?", {
+  max_tokens: 128,
+  temperature: 0,
+  top_k: 1,
+  ignore_eos: true,
+});
+console.log(text);
+console.log(metrics);
 
 model.delete();
 ```

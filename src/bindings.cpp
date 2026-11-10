@@ -1,8 +1,13 @@
+#include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 #include <emscripten/proxying.h>
 #include <thread>
+#include <vector>
 
 #include "gemma/gemma.h"
 #include "gemma/gemma_args.h"
@@ -12,6 +17,22 @@
 
 using namespace emscripten;
 
+namespace {
+
+template <typename T>
+std::optional<T> getOption(const emscripten::val& options, const char* key) {
+  if (!options.hasOwnProperty(key)) {
+    return std::nullopt;
+  }
+  const emscripten::val val = options[key];
+  if (val.isUndefined() || val.isNull()) {
+    return std::nullopt;
+  }
+  return val.as<T>();
+}
+
+}  // namespace
+
 class GemmaPipeline {
 public:
   struct GenerateOptions {
@@ -19,6 +40,12 @@ public:
     std::optional<float> temperature;
     std::optional<int> top_k;
     std::optional<bool> ignore_eos;
+  };
+
+  struct GenerateResult {
+    std::string text;
+    size_t prompt_tokens = 0;
+    gcpp::TimingInfo timing_info;
   };
 
   GemmaPipeline(const std::string& tokenizer_path, const std::string& weights_path) {
@@ -37,22 +64,32 @@ public:
     env = std::make_unique<gcpp::MatMulEnv>(*ctx);
   }
 
-  std::string generate(const std::string& prompt, const GenerateOptions& options) {
+  GenerateResult generate(const std::string& prompt, const GenerateOptions& options) {
     std::vector<int> tokens = gcpp::WrapAndTokenize(
         model->Tokenizer(), model->ChatTemplate(),
         model->Config().wrapping, 0, prompt);
 
+    const bool ignore_eos = options.ignore_eos.value_or(false);
+    const int eos_id = model->Config().eos_id;
+    const int secondary_eos_id = model->Config().secondary_eos_id;
+    const int vocab_size = static_cast<int>(model->Config().vocab_size);
+    const int max_top_k = std::max(1, vocab_size - (ignore_eos ? 2 : 0));
+
     gcpp::RuntimeConfig runtime_config;
     model->Inference().CopyTo(runtime_config);
     if (options.max_tokens.has_value()) {
-      runtime_config.max_generated_tokens = options.max_tokens.value();
+      runtime_config.max_generated_tokens =
+          static_cast<size_t>(std::max(0, options.max_tokens.value()));
     }
     if (options.top_k.has_value()) {
-      runtime_config.top_k = options.top_k.value();
+      runtime_config.top_k = static_cast<size_t>(
+          std::clamp(options.top_k.value(), 1, max_top_k));
+    } else if (runtime_config.top_k > static_cast<size_t>(max_top_k)) {
+      runtime_config.top_k = static_cast<size_t>(max_top_k);
     }
     if (options.temperature.has_value()) {
       float temp = options.temperature.value();
-      if (temp <= 0.0f) {
+      if (!std::isfinite(temp) || temp <= 0.0f) {
         runtime_config.top_k = 1;
         runtime_config.temperature = 1.0f;
       } else {
@@ -60,24 +97,20 @@ public:
       }
     }
 
-    if (options.ignore_eos.value_or(false)) {
-      int eos_id = model->Config().eos_id;
-      int secondary_eos_id = model->Config().secondary_eos_id;
+    if (ignore_eos) {
       if (runtime_config.top_k == 1) {
         runtime_config.sample_func = [eos_id, secondary_eos_id](
             size_t /*qi*/, size_t /*pos*/, gcpp::Logits logits, size_t /*worker*/) -> gcpp::TokenAndProb {
-          if (eos_id >= 0 && static_cast<size_t>(eos_id) < logits.size()) {
-            logits[eos_id] = -1e30f;
-          }
-          if (secondary_eos_id >= 0 && static_cast<size_t>(secondary_eos_id) < logits.size()) {
-            logits[secondary_eos_id] = -1e30f;
-          }
           int best_token = 0;
-          float best_logit = logits[0];
-          for (size_t i = 1; i < logits.size(); ++i) {
+          float best_logit = -std::numeric_limits<float>::infinity();
+          for (size_t i = 0; i < logits.size(); ++i) {
+            int tok = static_cast<int>(i);
+            if (tok == eos_id || tok == secondary_eos_id) {
+              continue;
+            }
             if (logits[i] > best_logit) {
               best_logit = logits[i];
-              best_token = static_cast<int>(i);
+              best_token = tok;
             }
           }
           return gcpp::TokenAndProb{best_token, 1.0f};
@@ -90,13 +123,13 @@ public:
     }
 
     const size_t prompt_size = tokens.size();
-    std::string result;
-    runtime_config.batch_stream_token = [&result, prompt_size, this](
+    std::string text;
+    runtime_config.batch_stream_token = [&text, prompt_size, this](
         size_t /*query_idx*/, size_t pos, int token, float /*prob*/) {
       if (pos >= prompt_size) {
         std::string piece;
         if (model->Tokenizer().Decode({token}, &piece)) {
-          result += piece;
+          text += piece;
         }
       }
       return true;
@@ -107,7 +140,7 @@ public:
 
     model->Generate(runtime_config, hwy::Span<const int>(tokens.data(), tokens.size()), 0, kv_cache, *env, timing_info);
 
-    return result;
+    return GenerateResult{std::move(text), prompt_size, timing_info};
   }
 
   struct GenerateContext {
@@ -115,32 +148,47 @@ public:
     std::string prompt;
     GenerateOptions options;
     emscripten::val callback;
-    std::string result;
+    GenerateResult result;
     GenerateContext(GemmaPipeline* p, std::string pr, GenerateOptions opts, emscripten::val cb)
         : pipeline(p), prompt(std::move(pr)), options(opts), callback(cb) {}
   };
 
   static void generate_done(void* arg) {
     auto* ctx = static_cast<GenerateContext*>(arg);
-    ctx->callback(ctx->result);
+    const auto& ti = ctx->result.timing_info;
+    const double prefill_tps =
+        ti.prefill_duration > 0.0
+            ? static_cast<double>(ti.prefill_tokens) / ti.prefill_duration
+            : 0.0;
+    const double decode_tps =
+        ti.generate_duration > 0.0
+            ? static_cast<double>(ti.tokens_generated) / ti.generate_duration
+            : 0.0;
+
+    emscripten::val metrics = emscripten::val::object();
+    metrics.set("ttft_ms", ti.time_to_first_token * 1000.0);
+    metrics.set("prompt_tokens", static_cast<double>(ctx->result.prompt_tokens));
+    metrics.set("prefill_tokens", static_cast<double>(ti.prefill_tokens));
+    metrics.set("prefill_duration_ms", ti.prefill_duration * 1000.0);
+    metrics.set("prefill_tokens_per_sec", prefill_tps);
+    metrics.set("tokens_generated", static_cast<double>(ti.tokens_generated));
+    metrics.set("decode_duration_ms", ti.generate_duration * 1000.0);
+    metrics.set("decode_tokens_per_sec", decode_tps);
+
+    emscripten::val response = emscripten::val::object();
+    response.set("text", ctx->result.text);
+    response.set("metrics", metrics);
+    ctx->callback(response);
     delete ctx;
   }
 
   void generateAsync(const std::string& prompt, emscripten::val options, emscripten::val callback) {
     GenerateOptions opts;
     if (!options.isUndefined() && !options.isNull()) {
-      if (options.hasOwnProperty("max_tokens")) {
-        opts.max_tokens = options["max_tokens"].as<int>();
-      }
-      if (options.hasOwnProperty("temperature")) {
-        opts.temperature = options["temperature"].as<float>();
-      }
-      if (options.hasOwnProperty("top_k")) {
-        opts.top_k = options["top_k"].as<int>();
-      }
-      if (options.hasOwnProperty("ignore_eos")) {
-        opts.ignore_eos = options["ignore_eos"].as<bool>();
-      }
+      opts.max_tokens = getOption<int>(options, "max_tokens");
+      opts.temperature = getOption<float>(options, "temperature");
+      opts.top_k = getOption<int>(options, "top_k");
+      opts.ignore_eos = getOption<bool>(options, "ignore_eos");
     }
     auto* ctx = new GenerateContext(this, prompt, opts, callback);
     std::thread([ctx]() {
